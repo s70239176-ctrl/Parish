@@ -230,7 +230,12 @@ class ParishMarkets(gl.Contract):
 
     @gl.public.view
     def list_market_ids(self) -> str:
-        return json.dumps(self.market_ids)
+        encoded = "["
+        for index in range(len(self.market_ids)):
+            if index > 0:
+                encoded = encoded + ","
+            encoded = encoded + json.dumps(self.market_ids[index])
+        return encoded + "]"
 
     @gl.public.view
     def get_stats(self) -> str:
