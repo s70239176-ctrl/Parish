@@ -19,7 +19,7 @@ export async function connectStudionet() { if (!window.ethereum) throw new Error
 export async function readJson(functionName: string, args: string[] = []) {
   if (!isConfigured) throw new Error('Contract not configured.')
   try {
-    const data = await getReadClient().readContract({ address: CONTRACT_ADDRESS as `0x${string}`, functionName, args, jsonSafeReturn: true })
+    const data = await getReadClient().readContract({ address: CONTRACT_ADDRESS as `0x${string}`, functionName, args })
     return JSON.parse(String(data))
   } catch (error) {
     const message = errorMessage(error)
