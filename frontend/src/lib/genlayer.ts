@@ -7,7 +7,16 @@ const savedAddress = () => localStorage.getItem('parish.wallet') as `0x${string}
 export const getReadClient = () => createClient({ chain: studionet })
 export const getWriteClient = () => { const account = savedAddress(); if (!window.ethereum || !account) throw new Error('Connect a MetaMask wallet first.'); return createClient({ chain: studionet, account, provider: window.ethereum }) }
 export async function connectStudionet() { if (!window.ethereum) throw new Error('MetaMask is required for Studionet writes.'); const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' }) as string[]; const chain = await window.ethereum.request({ method: 'eth_chainId' }) as string; if (parseInt(chain, 16) !== 61999) throw new Error('Switch MetaMask to Studionet (chain 61999).'); if (!accounts[0]) throw new Error('MetaMask did not return an account.'); localStorage.setItem('parish.wallet', accounts[0].toLowerCase()); await getWriteClient().connect('studionet'); return accounts[0] }
-export async function readJson(functionName: string, args: string[] = []) { if (!isConfigured) throw new Error('Contract not configured.'); const data = await getReadClient().readContract({ address: CONTRACT_ADDRESS as `0x${string}`, functionName, args, jsonSafeReturn: true }); return JSON.parse(String(data)) }
-export async function writeTx(functionName: string, args: string[], valueWei?: bigint) { if (!isConfigured) throw new Error('Contract not configured.'); await connectStudionet(); const client = getWriteClient(); const call = { address: CONTRACT_ADDRESS as `0x${string}`, functionName, args, ...(valueWei === undefined ? {} : { value: valueWei }) }; const quote = await client.estimateTransactionFeesForWrite(call); return client.writeContract({ ...call, fees: { distribution: quote.distribution, feeValue: quote.feeValue } }) }
+export async function readJson(functionName: string, args: string[] = []) {
+  if (!isConfigured) throw new Error('Contract not configured.')
+  try {
+    const data = await getReadClient().readContract({ address: CONTRACT_ADDRESS as `0x${string}`, functionName, args, jsonSafeReturn: true })
+    return JSON.parse(String(data))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown RPC error.'
+    throw new Error(`Could not read ${functionName}: ${message}`)
+  }
+}
+export async function writeTx(functionName: string, args: string[], valueWei?: bigint) { if (!isConfigured) throw new Error('Contract not configured.'); await connectStudionet(); const client = getWriteClient(); const call = { address: CONTRACT_ADDRESS as `0x${string}`, functionName, args, ...(valueWei === undefined ? {} : { value: valueWei }) }; try { const quote = await client.estimateTransactionFeesForWrite(call); return client.writeContract({ ...call, fees: { distribution: quote.distribution, feeValue: quote.feeValue } }) } catch (error) { const message = error instanceof Error ? error.message : 'Unknown wallet or RPC error.'; throw new Error(`Could not submit ${functionName}: ${message}`) } }
 export async function waitUntilFinal(hash: `0x${string}`) { const receipt = await getWriteClient().waitForFinalization({ hash }); if (!isSuccessful(receipt)) throw new Error(`Transaction did not succeed: ${receipt.statusName}.`); return receipt }
 export async function getBalance(wallet: string) { const balance = await window.ethereum?.request({ method: 'eth_getBalance', params: [wallet, 'latest'] }); return BigInt(String(balance || '0x0')) }
