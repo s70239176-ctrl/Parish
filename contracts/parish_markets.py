@@ -170,8 +170,9 @@ class ParishMarkets(gl.Contract):
             if mode in ("EVIDENCE", "HYBRID") and evidence_url != "":
                 evidence_text = gl.nondet.web.get(evidence_url).body.decode()[:6000]
             prompt = "Resolve this YES/NO prediction market using only supplied material. Return JSON with outcome exactly YES, NO, UNRESOLVED, or INVALID, and concise reasoning. Question: " + question + " Rules: " + rules + " Primary: " + primary_text + " Evidence note: " + evidence_note + " Evidence: " + evidence_text
-            answer = gl.nondet.exec_prompt(prompt, response_format="json")
-            parsed = json.loads(answer)
+            parsed = gl.nondet.exec_prompt(prompt, response_format="json")
+            if not isinstance(parsed, dict):
+                raise Exception("Resolver returned invalid JSON.")
             outcome = str(parsed.get("outcome", "UNRESOLVED")).upper()
             if outcome not in ("YES", "NO", "UNRESOLVED", "INVALID"):
                 outcome = "UNRESOLVED"
