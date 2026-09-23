@@ -239,4 +239,10 @@ class ParishMarkets(gl.Contract):
 
     @gl.public.view
     def get_stats(self) -> str:
-        return json.dumps({"market_count": str(self.market_count), "min_stake_wei": str(self.min_stake)}, sort_keys=True)
+        count = int(self.market_count)
+        minimum = int(self.min_stake)
+        return "{\"market_count\":\"" + str(count) + "\",\"min_stake_wei\":\"" + str(minimum) + "\"}"
+
+    @gl.public.view
+    def health(self) -> str:
+        return "\"PARISH_OK\""

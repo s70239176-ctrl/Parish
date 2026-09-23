@@ -20,6 +20,8 @@ export default function App() {
     try {
       // IDs are deterministically m-1 through m-N. This avoids serializing a
       // GenLayer DynArray in a view call, which some Studio runtimes reject.
+      const health = await readJson('health') as string
+      if (health !== 'PARISH_OK') throw new Error('The configured contract did not pass its health check.')
       const stats = await readJson('get_stats') as { market_count: string }
       const ids = Array.from({ length: Number(stats.market_count) }, (_, index) => `m-${index + 1}`)
       const all = await Promise.all(ids.map(id => readJson('get_market', [id])))
