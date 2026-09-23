@@ -13,7 +13,10 @@ export const errorMessage = (error: unknown) => {
   return String(error || 'Unknown wallet or RPC error.')
 }
 const savedAddress = () => localStorage.getItem('parish.wallet') as `0x${string}` | null
-export const getReadClient = () => createClient({ chain: studionet })
+// Studio's hosted RPC rejects zero-address read callers. Views are public, so
+// use the configured contract address as a stable non-zero read context; it
+// never signs or transfers funds.
+export const getReadClient = () => createClient({ chain: studionet, ...(isConfigured ? { account: CONTRACT_ADDRESS as `0x${string}` } : {}) })
 export const getWriteClient = () => { const account = savedAddress(); if (!window.ethereum || !account) throw new Error('Connect a MetaMask wallet first.'); return createClient({ chain: studionet, account, provider: window.ethereum }) }
 export async function connectStudionet() { if (!window.ethereum) throw new Error('MetaMask is required for Studionet writes.'); const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' }) as string[]; const chain = await window.ethereum.request({ method: 'eth_chainId' }) as string; if (parseInt(chain, 16) !== 61999) throw new Error('Switch MetaMask to Studionet (chain 61999).'); if (!accounts[0]) throw new Error('MetaMask did not return an account.'); localStorage.setItem('parish.wallet', accounts[0].toLowerCase()); await getWriteClient().connect('studionet'); return accounts[0] }
 export async function readJson(functionName: string, args: string[] = []) {
