@@ -1,29 +1,35 @@
 # Parish — The Local Odds Desk
 
-A pixel-focused recreation of the supplied Parish editorial prediction-market reference, built with Next.js App Router, TypeScript, CSS, Lucide icons, and local mock state.
+A live GenLayer Studionet prediction-market dApp. Market data, pools, evidence, resolution status, and user actions are read from or written to the deployed `ParishMarkets` contract—there is no mock market data.
 
 ## Run locally
 
 ```bash
-npm install
+npm --prefix frontend install
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open the Vite URL shown in the terminal (normally `http://localhost:5173`).
 
 ## Deploy to Vercel
 
-Vercel detects the Next.js application from the repository root. No environment variables are required for this mock interface.
+Set this Vercel environment variable for Production, Preview, and Development:
+
+```bash
+VITE_CONTRACT_ADDRESS=0xYourDeployedParishMarketsAddress
+```
+
+The deployment uses `frontend/` as its Vite source.
 
 ```bash
 npm run build
 ```
 
-## Included interactions
+## Live interactions
 
-- Search questions, categories, and locations; press `Cmd/Ctrl + K` to focus it.
-- Filter market cards by category and sort by activity, probability, or traders.
-- Complete and submit the **Post a notice** form for its local success state.
-- Responsive 3-column / 2-column / 1-column editorial layout.
+- Read final market count and every market from the configured contract.
+- Connect an EIP-1193 wallet to Studionet (chain ID `61999`).
+- Create a market, stake GEN, submit evidence, close, resolve, and claim payouts.
+- Refresh from finalized contract state after a completed transaction.
 
-The earlier GenLayer contract remains in `contracts/parish_markets.py`, deliberately separate from this standalone, mock-data UI recreation.
+Contract source: `contracts/parish_markets.py`.
