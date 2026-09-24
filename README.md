@@ -1,26 +1,29 @@
-# Parish
+# Parish — The Local Odds Desk
 
-Parish is a Studionet prediction-market dApp for specific, local YES/NO questions. The contract settles outcomes through GenLayer validator consensus and sends real native GEN payouts only after finalization.
+A pixel-focused recreation of the supplied Parish editorial prediction-market reference, built with Next.js App Router, TypeScript, CSS, Lucide icons, and local mock state.
 
-## Run it on Studionet
+## Run locally
 
-1. Get Studionet GEN from the [Studio faucet droplet](https://studio.genlayer.com).
-2. Deploy `contracts/parish_markets.py` on Studionet in Studio or run:
+```bash
+npm install
+npm run dev
+```
 
-   ```sh
-   genlayer network set studionet
-   genlayer deploy --contract contracts/parish_markets.py --args "10000000000000000"
-   ```
+Open `http://localhost:3000`.
 
-3. Copy the deployed address.
-4. Set `frontend/.env`:
+## Deploy to Vercel
 
-   ```sh
-   VITE_CONTRACT_ADDRESS=0x...
-   ```
+Vercel detects the Next.js application from the repository root. No environment variables are required for this mock interface.
 
-5. Run `npm install && npm run dev` from `frontend`.
-6. In MetaMask, add Studionet RPC `https://studio.genlayer.com/api`, chain ID `61999`, symbol `GEN`.
-7. Create a market that closes in at least five minutes, stake YES and NO from two funded accounts with real GEN, submit evidence, wait for the deadline, resolve, then claim.
+```bash
+npm run build
+```
 
-The app refuses to render a functional board without a configured address, refuses signing on any chain other than 61999, shows the real wallet GEN balance, and estimates fees per submitted contract write.
+## Included interactions
+
+- Search questions, categories, and locations; press `Cmd/Ctrl + K` to focus it.
+- Filter market cards by category and sort by activity, probability, or traders.
+- Complete and submit the **Post a notice** form for its local success state.
+- Responsive 3-column / 2-column / 1-column editorial layout.
+
+The earlier GenLayer contract remains in `contracts/parish_markets.py`, deliberately separate from this standalone, mock-data UI recreation.
