@@ -6,7 +6,3 @@ frontend/vite.config.js
 frontend/vite.config.d.ts
 contracts/__pycache__/
 work/
-
-node_modules/
-.next/
-dist/

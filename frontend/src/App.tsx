@@ -1,70 +1,29 @@
-import { useEffect, useState } from 'react'
-import Board, { MarketData } from './screens/Board'
-import Compose from './screens/Compose'
-import Market from './screens/Market'
-import { connectStudionet, getBalance, isConfigured, readJson, waitUntilFinal, writeTx } from './lib/genlayer'
-import { genToWei, shortAddress, weiToGen } from './lib/format'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { connectStudionet, errorMessage, getBalance, isConfigured, readJson, waitUntilFinal, writeTx } from './lib/genlayer'
+import { genToWei, shortAddress, timeLeft, weiToGen } from './lib/format'
 
-type View = 'board' | 'compose' | 'market'
+type Market = { id:string; question:string; rules:string; category:string; place:string; primary_source_url:string; resolution_mode:string; closes_at_unix:string; status:string; outcome:string; reasoning:string; yes_pool:string; no_pool:string }
+type View = 'board' | 'post' | 'market'
+const tabs = ['All', 'Near', 'Git', 'Civic', 'Weird']
 
 export default function App() {
-  const [view, setView] = useState<View>('board')
-  const [markets, setMarkets] = useState<MarketData[]>([])
-  const [selected, setSelected] = useState<MarketData | null>(null)
-  const [wallet, setWallet] = useState(localStorage.getItem('parish.wallet') || '')
-  const [balance, setBalance] = useState(0n)
-  const [notice, setNotice] = useState('')
-
-  const refresh = async () => {
-    if (!isConfigured) return
-    try {
-      // IDs are deterministically m-1 through m-N. This avoids serializing a
-      // GenLayer DynArray in a view call, which some Studio runtimes reject.
-      const health = await readJson('health') as string
-      if (health !== 'PARISH_OK') throw new Error('The configured contract did not pass its health check.')
-      const stats = await readJson('get_stats') as { market_count: string }
-      const ids = Array.from({ length: Number(stats.market_count) }, (_, index) => `m-${index + 1}`)
-      const all = await Promise.all(ids.map(id => readJson('get_market', [id])))
-      setMarkets(all)
-      setSelected(current => current ? all.find(market => market.id === current.id) || null : null)
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not load markets.')
-    }
-  }
-
-  useEffect(() => { refresh() }, [])
-  useEffect(() => { if (wallet) getBalance(wallet).then(setBalance).catch(() => {}) }, [wallet])
-
-  const connect = async () => {
-    try {
-      const account = await connectStudionet()
-      setWallet(account)
-      setBalance(await getBalance(account))
-      setNotice('Wallet connected to Studionet.')
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not connect wallet.')
-    }
-  }
-
-  const transact = async (name: string, args: string[], amount?: string) => {
-    if (['create_market', 'stake'].includes(name) && balance === 0n) throw new Error('Your wallet has no GEN. Use the Studio faucet before creating or staking.')
-    const hash = await writeTx(name, args, amount === undefined ? undefined : genToWei(amount))
-    setNotice(`Submitted ${hash}. Waiting for finalization…`)
-    await waitUntilFinal(hash)
-    setNotice('Finalized on Studionet.')
-    await refresh()
-    if (wallet) setBalance(await getBalance(wallet))
-  }
-
-  if (!isConfigured) return <main className="hard-error"><h1>Contract not configured.</h1><p>Set <code>VITE_CONTRACT_ADDRESS</code> to a deployed ParishMarkets address, then restart Vite.</p></main>
-  const pick = (id: string) => { setSelected(markets.find(market => market.id === id) || null); setView('market') }
-
-  return <main>
-    <header><div><p className="mast">PARISH</p><p className="tag">The local odds desk</p></div><div className="network"><b>STUDIONET</b><span>chain 61999</span><a href={`https://explorer-studio.genlayer.com/address/${import.meta.env.VITE_CONTRACT_ADDRESS}`} target="_blank">{import.meta.env.VITE_CONTRACT_ADDRESS}</a></div><div className="wallet"><span>{shortAddress(wallet)}</span><b>{weiToGen(balance)} GEN</b><button onClick={connect}>Connect</button></div></header>
-    <nav><button onClick={() => setView('board')}>Board</button><button onClick={() => setView('compose')}>Post a market</button><a href="https://studio.genlayer.com" target="_blank">Studio faucet ↗</a></nav>
-    {notice && <p className="noticebar">{notice}</p>}
-    {view === 'board' && <Board markets={markets} select={pick} />}
-    {view === 'compose' && <Compose submit={async values => { await transact('create_market', values); setView('board') }} />}
-    {view === 'market' && selected && <Market market={selected} action={transact} back={() => setView('board')} />}
-  </main>
+  const [view, setView] = useState<View>('board'), [markets, setMarkets] = useState<Market[]>([]), [selected, setSelected] = useState<Market | null>(null)
+  const [wallet, setWallet] = useState(localStorage.getItem('parish.wallet') || ''), [balance, setBalance] = useState(0n), [notice, setNotice] = useState('')
+  const [query, setQuery] = useState(''), [tab, setTab] = useState('All'), [sort, setSort] = useState('Most Active')
+  const search = useRef<HTMLInputElement>(null)
+  const refresh = async () => { if (!isConfigured) return; try { const stats = await readJson('get_stats') as {market_count:string}; const ids = Array.from({length:Number(stats.market_count)},(_,i)=>`m-${i+1}`); const all = await Promise.all(ids.map(id=>readJson('get_market',[id]) as Promise<Market>)); setMarkets(all); setSelected(old=>old ? all.find(m=>m.id===old.id) || null : null) } catch (e) { setNotice(errorMessage(e)) } }
+  useEffect(()=>{ refresh() },[])
+  useEffect(()=>{ const key=(e:KeyboardEvent)=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();search.current?.focus()}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key)},[])
+  useEffect(()=>{if(wallet)getBalance(wallet).then(setBalance).catch(()=>{})},[wallet])
+  const connect = async () => { try { const account=await connectStudionet();setWallet(account);setBalance(await getBalance(account));setNotice('Wallet connected to Studionet.') } catch(e) {setNotice(errorMessage(e))} }
+  const transact = async (name:string,args:string[],amount?:string) => { try { const hash=await writeTx(name,args,amount===undefined?undefined:genToWei(amount));setNotice(`Transaction ${hash} submitted. Waiting for finalization…`);await waitUntilFinal(hash);setNotice('Finalized on Studionet.');await refresh();if(wallet)setBalance(await getBalance(wallet)) } catch(e) {setNotice(errorMessage(e));throw e} }
+  const shown = useMemo(()=>[...markets].filter(m=>(tab==='All'||tab==='Near'||m.category.toLowerCase()===tab.toLowerCase())&&[m.question,m.category,m.place].join(' ').toLowerCase().includes(query.toLowerCase())).sort((a,b)=>{const ay=Number(BigInt(a.yes_pool)),by=Number(BigInt(b.yes_pool)),at=ay+Number(BigInt(a.no_pool)),bt=by+Number(BigInt(b.no_pool));if(sort==='Highest Probability')return by/bt-ay/at;if(sort==='Lowest Probability')return ay/at-by/bt;if(sort==='Most Traders')return bt-at;return bt-at}),[markets,query,tab,sort])
+  if(!isConfigured)return <main className="hard-error"><h1>Contract not configured.</h1><p>Set <code>VITE_CONTRACT_ADDRESS</code> to your deployed ParishMarkets address.</p></main>
+  const open=(market:Market)=>{setSelected(market);setView('market')}
+  return <main className="sheet"><header className="masthead"><div className="brand"><div><b>PARISH</b><span>THE LOCAL ODDS DESK</span></div><i/><p>REAL QUESTIONS.<br/>LOCAL PEOPLE.<br/>LIVE ODDS.</p></div><div className="account-controls"><button onClick={connect}>▣ <small>WALLET</small><strong>{weiToGen(balance)} <em>GEN</em></strong></button><button onClick={connect}>◎ <strong>{shortAddress(wallet)}</strong>⌄</button></div></header><nav className="top-nav"><div><button className={view==='board'?'active':''} onClick={()=>setView('board')}>Board</button><button className={view==='post'?'active':''} onClick={()=>setView('post')}>Post a market</button><a href="https://studio.genlayer.com" target="_blank">Studio faucet ↗</a></div><label className="search">⌕<input ref={search} value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search markets, places, topics..."/><kbd>⌘ K</kbd></label></nav>{notice&&<p className="noticebar">{notice}</p>}{view==='board'&&<><div className="category-row"><div className="tabs">{tabs.map(item=><button key={item} className={tab===item?'selected':''} onClick={()=>setTab(item)}>{item}</button>)}</div><label className="sort">Sort by: <select value={sort} onChange={e=>setSort(e.target.value)}><option>Most Active</option><option>Highest Probability</option><option>Lowest Probability</option><option>Most Traders</option></select>⌄</label></div><div className="content"><section className="market-grid">{shown.map(m=><MarketCard key={m.id} market={m} open={open}/>) }{shown.length===0&&<p className="empty">No live markets match that search.</p>}</section><Desk markets={markets} open={open} post={()=>setView('post')}/></div></>}{view==='post'&&<Post submit={async values=>{await transact('create_market',values);setView('board')}}/>}{view==='market'&&selected&&<MarketView market={selected} back={()=>setView('board')} act={transact}/>}<footer><b>✦ PARISH</b><span>LOCAL PREDICTIONS. REAL IMPACT.</span><nav><a>About</a><a>Help</a><a>Terms</a><a>Privacy</a><a>𝕏</a></nav></footer></main>
 }
+
+function MarketCard({market,open}:{market:Market;open:(m:Market)=>void}){const yes=BigInt(market.yes_pool),no=BigInt(market.no_pool),total=yes+no,p=total?Number(yes*100n/total):50;return <article className="market-card" onClick={()=>open(market)}><div className="card-top"><span className={`status ${market.status.toLowerCase()}`}>{market.status}</span><span className="category">{market.category}</span><span className="change">↗ LIVE</span></div><h2>{market.question}</h2><div className="metadata"><span>▣ {new Date(Number(market.closes_at_unix)*1000).toLocaleString()}</span><span>● {market.place}</span></div><div className="prices"><div><label>YES</label><strong>{p}¢</strong></div><div><label>NO</label><strong>{100-p}¢</strong></div></div><div className="probability"><span style={{width:`${p}%`}}>{p}%</span><span>{100-p}%</span></div><div className="card-stats"><span>◉ {weiToGen(yes+no)} GEN pool</span><span>{timeLeft(market.closes_at_unix)}</span></div><div className="card-bottom"><a>● {market.place}</a><a>View market →</a></div></article>}
+function Desk({markets,open,post}:{markets:Market[];open:(m:Market)=>void;post:()=>void}){const resolved=markets.filter(m=>m.status==='RESOLVED'||m.status==='VOID').slice(0,3);return <aside className="desk"><div className="desk-title"><h2>DESK</h2><span><i/> LIVE MARKET MOVEMENT ↗</span></div><div className="movement">{markets.slice(0,5).map(m=><button key={m.id} onClick={()=>open(m)}><span>▧</span><p>{m.question.slice(0,25)} <b>({m.category})</b></p><strong>{weiToGen(BigInt(m.yes_pool)+BigInt(m.no_pool))} GEN</strong>↗</button>)}</div><section className="resolutions"><header><h3>RECENT RESOLUTIONS</h3></header>{resolved.length?resolved.map(m=><button key={m.id} onClick={()=>open(m)}><span className={`mini-pill ${m.outcome==='YES'?'yes':'void'}`}>{m.outcome||'VOID'}</span><p>{m.question}<small>{m.reasoning||'Finalized on Studionet'}</small></p><strong>{m.outcome||'VOID'}</strong></button>):<p className="muted">No finalized markets yet.</p>}</section><section className="notice"><header><h3>POST A NOTICE ↗</h3><button onClick={post}>Post market →</button></header><p>Every notice is posted directly to the ParishMarkets contract.</p></section></aside>}
+function Post({submit}:{submit:(values:string[])=>Promise<void>}){const [busy,setBusy]=useState(false),[error,setError]=useState('');const close=new Date(Date.now()+360000).toISOString().slice(0,16);const send=async(e:FormEvent<HTMLFormElement>)=>{e.preventDefault();setBusy(true);setError('');const f=new FormData(e.currentTarget);try{await submit([String(f.get('question')),String(f.get('rules')),String(f.get('category')),String(f.get('place')),String(f.get('source')),String(f.get('mode')),String(Math.floor(new Date(String(f.get('close'))).getTime()/1000))])}catch(x){setError(errorMessage(x))}finally{setBusy(false)}};return <form className="compose" onSubmit={send}><h1>POST A NOTICE</h1><div className="notice-fields"><label>Question<textarea name="question" minLength={10} required placeholder="Type your question..."/></label><label>Resolution Rules<textarea name="rules" minLength={10} required placeholder="Rules for a yes/no outcome..."/></label><label>Place<input name="place" required placeholder="e.g. 5th & Pine"/></label><label>Category<select name="category"><option>Civic</option><option>Near</option><option>Git</option><option>Weird</option></select></label><label>Primary Source URL<input name="source" type="url" placeholder="https://..."/></label><label>Resolution Mode<select name="mode"><option>HYBRID</option><option>WEB</option><option>EVIDENCE</option></select></label><label>Close Time<input name="close" type="datetime-local" defaultValue={close} required/></label></div>{error&&<p className="error">{error}</p>}<button className="ink" disabled={busy}>{busy?'Submitting…':'Post market'}</button></form>}
+function MarketView({market,back,act}:{market:Market;back:()=>void;act:(n:string,a:string[],v?:string)=>Promise<void>}){const[amount,setAmount]=useState(''),[side,setSide]=useState('YES'),[url,setUrl]=useState(''),[note,setNote]=useState('');const overdue=Number(market.closes_at_unix)<=Date.now()/1000;const run=(n:string,a:string[]=[],v?:string)=>act(n,a,v).catch(()=>{});return <section className="market"><button className="back" onClick={back}>← Board</button><span className={`status ${market.status.toLowerCase()}`}>{market.status} {market.outcome&&`· ${market.outcome}`}</span><p className="kicker">{market.category} / {market.place}</p><h1>{market.question}</h1><p>{market.rules}</p><p>{timeLeft(market.closes_at_unix)}</p>{market.status==='OPEN'&&!overdue&&<div className="tickets"><button className={side==='YES'?'chosen':''} onClick={()=>setSide('YES')}>Back YES</button><button className={side==='NO'?'chosen':''} onClick={()=>setSide('NO')}>Back NO</button><input value={amount} onChange={e=>setAmount(e.target.value)} placeholder="GEN amount"/><button className="ink" onClick={()=>run('stake',[market.id,side],amount)}>Stake GEN</button></div>}<section className="evidence"><h2>PUT IT ON THE RECORD</h2><input value={url} onChange={e=>setUrl(e.target.value)} placeholder="Evidence URL"/><textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="What should validators notice?"/><button onClick={()=>run('submit_evidence',[market.id,url,note])}>Submit evidence</button></section>{overdue&&market.status==='OPEN'&&<button onClick={()=>run('close_if_due',[market.id])}>Close market</button>}{overdue&&['OPEN','CLOSED'].includes(market.status)&&<button className="ink" onClick={()=>run('resolve',[market.id])}>Resolve with validators</button>}{['RESOLVED','VOID'].includes(market.status)&&<button className="ink" onClick={()=>run('claim',[market.id])}>Claim GEN</button>}</section>}
