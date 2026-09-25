@@ -6,7 +6,7 @@ Hyper-local predictions ("will the taco truck be on 5th by 12:30?", "will the li
 
 ## Live demo
 
-`<add your deployed Vercel URL here, e.g. https://parish-markets.vercel.app>`
+`https://parish-markets.vercel.app`
 
 ## Contract details
 
@@ -16,8 +16,8 @@ Hyper-local predictions ("will the taco truck be on 5th by 12:30?", "will the li
 | Chain ID | `61999` (`0xf22f`) |
 | RPC URL | `https://studio.genlayer.com/api` |
 | Block explorer | https://explorer-studio.genlayer.com |
-| Contract | `ParishMarkets` — `<add your deployed contract address here>` |
-| Explorer link | `<https://explorer-studio.genlayer.com/address/><your contract address>` |
+| Contract | `ParishMarkets` — `0x99EA12811Da300414e5A963dE573F3699885b4F1` |
+| Explorer link | `https://explorer-studio.genlayer.com/address/><0x99EA12811Da300414e5A963dE573F3699885b4F1` |
 
 Get test GEN from the Studio faucet at https://studio.genlayer.com before staking or posting markets.
 
@@ -47,7 +47,7 @@ Get test GEN from the Studio faucet at https://studio.genlayer.com before stakin
 npm --prefix frontend install
 
 # create frontend/.env with your deployed contract address
-echo "VITE_CONTRACT_ADDRESS=0xYourDeployedParishMarketsAddress" > frontend/.env
+echo "VITE_CONTRACT_ADDRESS=0x99EA12811Da300414e5A963dE573F3699885b4F1" > frontend/.env
 
 npm run dev
 ```
@@ -63,7 +63,7 @@ npm run build
 **Deploy to Vercel** — the project builds `frontend/` as its Vite source (see `vercel.json`). Set this environment variable for Production, Preview, and Development:
 
 ```bash
-VITE_CONTRACT_ADDRESS=0xYourDeployedParishMarketsAddress
+VITE_CONTRACT_ADDRESS=0x99EA12811Da300414e5A963dE573F3699885b4F1
 ```
 
 ## Demo evidence
