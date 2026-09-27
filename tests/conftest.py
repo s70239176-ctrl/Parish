@@ -52,6 +52,8 @@ def gl():
     mock_genlayer.gl.nondet.web.calls.clear()
     mock_genlayer.gl.nondet._prompt_error = None
     mock_genlayer.gl.nondet.prompts.clear()
+    mock_genlayer.gl.eq_principle._fail_remaining = 0
+    mock_genlayer.gl.eq_principle.call_count = 0
     mock_genlayer.gl.message.sender_address = mock_genlayer.Address("0x" + "1" * 40)
     mock_genlayer.gl.message.value = mock_genlayer.u256(0)
     return mock_genlayer.gl

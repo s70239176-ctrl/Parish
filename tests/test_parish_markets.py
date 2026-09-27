@@ -37,7 +37,25 @@ class TestMarketLifecycle:
         as_user(CREATOR)
         with pytest.raises(Exception, match="five minutes"):
             contract.create_market("Is five minutes enforced?", "Resolves YES if so.",
-                "Civic", "CI", "", "WEB", str(clock.get() + 60))
+                "Civic", "CI", "https://example.com", "WEB", str(clock.get() + 60))
+
+    def test_web_mode_requires_a_primary_source_at_creation(self, contract, as_user, clock):
+        as_user(CREATOR)
+        with pytest.raises(Exception, match="primary source URL"):
+            contract.create_market("Does WEB mode need a source?", "Resolves YES if so.",
+                "Civic", "CI", "", "WEB", str(clock.get() + 600))
+
+    def test_hybrid_mode_requires_a_primary_source_at_creation(self, contract, as_user, clock):
+        as_user(CREATOR)
+        with pytest.raises(Exception, match="primary source URL"):
+            contract.create_market("Does HYBRID mode need a source?", "Resolves YES if so.",
+                "Civic", "CI", "", "HYBRID", str(clock.get() + 600))
+
+    def test_evidence_mode_does_not_require_a_source_at_creation(self, contract, as_user, clock):
+        as_user(CREATOR)
+        market_id = contract.create_market("Can EVIDENCE mode skip a source?", "Resolves YES if so.",
+            "Civic", "CI", "", "EVIDENCE", str(clock.get() + 600))
+        assert json.loads(contract.get_market(market_id))["resolution_mode"] == "EVIDENCE"
 
     def test_stake_rejected_after_close(self, contract, as_user, clock):
         market_id = make_market(contract, as_user, clock, closes_in=300)
@@ -130,6 +148,26 @@ class TestEvidenceHistory:
         with pytest.raises(Exception, match="full"):
             contract.submit_evidence(market_id, overflow_url, "one too many")
 
+    def test_evidence_rejected_once_overdue_even_if_still_open(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, closes_in=300)
+        clock.advance(301)  # deadline passed, but nobody called close_if_due yet
+        assert json.loads(contract.get_market(market_id))["status"] == "OPEN"
+        gl.nondet.web.set_response("https://late.example", b"x", 200)
+        as_user(ALICE)
+        with pytest.raises(Exception, match="before its deadline"):
+            contract.submit_evidence(market_id, "https://late.example", "too late")
+
+    def test_evidence_rejected_once_closed(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, closes_in=300)
+        clock.advance(301)
+        as_user(CREATOR)
+        contract.close_if_due(market_id)
+        assert json.loads(contract.get_market(market_id))["status"] == "CLOSED"
+        gl.nondet.web.set_response("https://late.example", b"x", 200)
+        as_user(ALICE)
+        with pytest.raises(Exception, match="before its deadline"):
+            contract.submit_evidence(market_id, "https://late.example", "too late")
+
 
 class TestResolutionSafety:
     def test_consensus_failure_falls_back_to_void_not_a_crash(self, contract, as_user, clock, gl):
@@ -195,6 +233,96 @@ class TestResolutionSafety:
         contract.claim(market_id)
         assert mg.TRANSFERS[-1]["kwargs"]["value"] == MIN_STAKE
 
+    def test_evidence_mode_without_evidence_voids_deterministically(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "VOID"
+        assert gl.nondet.web.calls == []
+        assert gl.nondet.prompts == []
+
+    def test_hybrid_mode_without_source_or_evidence_voids_deterministically(self, contract, as_user, clock, gl):
+        # HYBRID normally requires a source at creation; simulate an older
+        # market that predates that rule by clearing it directly on the record.
+        market_id = make_market(contract, as_user, clock, mode="HYBRID", source="https://placeholder.example")
+        stored = contract.markets[market_id]
+        stored.primary_source_url = ""
+        contract.markets[market_id] = stored
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "VOID"
+        assert gl.nondet.web.calls == []
+
+    def test_unverified_evidence_is_never_fed_to_the_resolver(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        gl.nondet.web.set_response("http://plain-http.example", b"insecure body", 200)  # not https -> unverified
+        as_user(ALICE)
+        entry = json.loads(contract.submit_evidence(market_id, "http://plain-http.example", "check this"))
+        assert entry["verified"] is False
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        # No verified evidence exists, so this is treated the same as no evidence at all.
+        assert result["status"] == "VOID"
+        assert gl.nondet.prompts == []
+
+    def test_evidence_content_drift_since_submission_is_not_trusted(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        url = "https://drifting.example/page"
+        gl.nondet.web.set_response(url, b"the original, hashed content", 200)
+        as_user(ALICE)
+        entry = json.loads(contract.submit_evidence(market_id, url, "here's my evidence"))
+        assert entry["verified"] is True
+        # The page changed after submission — a fresh fetch at resolution time
+        # no longer hashes to what was snapshotted, so it must not be trusted.
+        gl.nondet.web.set_response(url, b"a completely different body now", 200)
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "VOID"
+        assert gl.nondet.prompts == []
+
+    def test_evidence_matching_its_submission_hash_is_used(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        url = "https://stable.example/page"
+        gl.nondet.web.set_response(url, b"stable content", 200)
+        as_user(ALICE)
+        contract.submit_evidence(market_id, url, "here's my evidence")
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        stake(contract, as_user, market_id, ALICE, "YES")
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "RESOLVED" and result["outcome"] == "YES"
+        assert len(gl.nondet.prompts) == 1
+        assert "here's my evidence" in gl.nondet.prompts[0]
+
+    def test_consensus_failure_is_retried_then_settles_void(self, contract, as_user, clock, gl, contract_module):
+        market_id = make_market(contract, as_user, clock, mode="WEB", source="https://source.example")
+        gl.nondet.web.set_response("https://source.example", b"content", 200)
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        gl.eq_principle.set_failure(times=contract_module.CONSENSUS_ATTEMPTS)  # every attempt disagrees
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "VOID"
+        assert gl.eq_principle.call_count == contract_module.CONSENSUS_ATTEMPTS
+
+    def test_consensus_failure_recovers_within_the_retry_budget(self, contract, as_user, clock, gl, contract_module):
+        assert contract_module.CONSENSUS_ATTEMPTS > 1, "test assumes there's room to recover after one failure"
+        market_id = make_market(contract, as_user, clock, mode="WEB", source="https://source.example")
+        stake(contract, as_user, market_id, ALICE, "YES")
+        gl.nondet.web.set_response("https://source.example", b"content", 200)
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        gl.eq_principle.set_failure(times=1)  # disagree once, then reach consensus
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "RESOLVED" and result["outcome"] == "YES"
+        assert gl.eq_principle.call_count == 2
+
 
 class TestSettlementAccounting:
     def _resolve_yes(self, contract, as_user, clock, gl, market_id, source):
@@ -217,22 +345,49 @@ class TestSettlementAccounting:
         market = json.loads(contract.get_market(market_id))
         assert market["status"] == "RESOLVED" and market["outcome"] == "YES"
         as_user(ALICE)
-        contract.claim(market_id)
-        assert mg.TRANSFERS[-1]["kwargs"]["value"] == 2 * MIN_STAKE + (2 * MIN_STAKE * MIN_STAKE) // (2 * MIN_STAKE)
+        result = json.loads(contract.claim(market_id))
+        expected_payout = 2 * MIN_STAKE + (2 * MIN_STAKE * MIN_STAKE) // (2 * MIN_STAKE)
+        assert result["payout"] == str(expected_payout)
+        assert mg.TRANSFERS[-1]["kwargs"]["value"] == expected_payout
+        # The sole winner claimed the entire pool; nothing is left outstanding.
+        assert json.loads(contract.get_market(market_id))["winner_pool_remaining"] == "0"
+        assert json.loads(contract.get_market(market_id))["loser_pool_remaining"] == "0"
 
-    def test_zero_payout_claim_raises_cleanly_and_stays_retryable_state(self, contract, as_user, clock, gl):
+    def test_payout_rounding_dust_is_fully_distributed_not_trapped(self, contract, as_user, clock, gl):
+        # 3 winning stakes that don't divide the losing pool evenly, claimed in
+        # an arbitrary order: the running-pool accounting must still hand out
+        # every last wei, regardless of claim order.
+        source = "https://source.example"
+        market_id = make_market(contract, as_user, clock, mode="WEB", source=source)
+        stake(contract, as_user, market_id, ALICE, "YES", amount=MIN_STAKE)
+        stake(contract, as_user, market_id, BOB, "YES", amount=MIN_STAKE)
+        winners_c = "0x" + "4" * 40
+        stake(contract, as_user, market_id, winners_c, "YES", amount=MIN_STAKE)
+        loser = "0x" + "5" * 40
+        stake(contract, as_user, market_id, loser, "NO", amount=10 * MIN_STAKE)
+        self._resolve_yes(contract, as_user, clock, gl, market_id, source)
+        total_paid = 0
+        for who in (winners_c, ALICE, BOB):  # deliberately not in stake order
+            as_user(who)
+            total_paid += int(json.loads(contract.claim(market_id))["payout"])
+        assert total_paid == 3 * MIN_STAKE + 10 * MIN_STAKE  # every wei of both pools accounted for, no dust left behind
+        market = json.loads(contract.get_market(market_id))
+        assert market["winner_pool_remaining"] == "0"
+        assert market["loser_pool_remaining"] == "0"
+
+    def test_zero_payout_claim_settles_terminally_without_a_transfer(self, contract, as_user, clock, gl):
         source = "https://source.example"
         market_id = make_market(contract, as_user, clock, mode="WEB", source=source)
         stake(contract, as_user, market_id, ALICE, "YES")
         stake(contract, as_user, market_id, BOB, "NO")
         self._resolve_yes(contract, as_user, clock, gl, market_id, source)
         as_user(BOB)
-        with pytest.raises(Exception, match="nothing to claim"):
-            contract.claim(market_id)
+        result = json.loads(contract.claim(market_id))
+        assert result == {"market_id": market_id, "payout": "0", "claimed": True}
         assert mg.TRANSFERS == []
-        # No transfer happened and the position was never marked claimed, so
-        # a bogus retry doesn't silently succeed either.
-        with pytest.raises(Exception, match="nothing to claim"):
+        # Settled terminally (claimed=True) even at zero payout, so it can't be
+        # claimed again — but it also didn't need to raise to get there.
+        with pytest.raises(Exception, match="no unclaimed position"):
             contract.claim(market_id)
 
     def test_double_claim_is_rejected(self, contract, as_user, clock, gl):

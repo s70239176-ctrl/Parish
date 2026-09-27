@@ -120,8 +120,26 @@ class _Nondet:
 
 
 class _EqPrinciple:
-    @staticmethod
-    def strict_eq(fn):
+    """By default just runs fn() once (single in-process "validator"). Tests
+    that need to simulate the consensus layer itself failing — validators
+    genuinely disagreeing / no majority — rather than fn()'s own content
+    failing, use set_failure() to make the next N calls raise regardless of
+    what fn() would have returned."""
+
+    def __init__(self):
+        self._fail_remaining = 0
+        self._fail_error: Exception | None = None
+        self.call_count = 0
+
+    def set_failure(self, times: int = 1, error: Exception | None = None):
+        self._fail_remaining = times
+        self._fail_error = error or Exception("validators did not reach a majority")
+
+    def strict_eq(self, fn):
+        self.call_count += 1
+        if self._fail_remaining > 0:
+            self._fail_remaining -= 1
+            raise self._fail_error
         return fn()
 
 

@@ -17,6 +17,13 @@ MAX_EVIDENCE_PER_MARKET = 50
 # How many times a single URL fetch is retried inside a non-deterministic
 # block before it is recorded as a failure.
 FETCH_ATTEMPTS = 3
+# How many times validator consensus (gl.eq_principle.strict_eq) itself is
+# retried before resolve() gives up and settles the market VOID rather than
+# reverting. This is distinct from FETCH_ATTEMPTS: a fetch can fail inside a
+# single nondet() run, but strict_eq itself can also fail outright (e.g. no
+# majority agreement across validators), and that needs its own bounded
+# retry/fallback so a real consensus failure still reaches a terminal state.
+CONSENSUS_ATTEMPTS = 2
 
 
 @allow_storage
@@ -38,6 +45,8 @@ class Market:
     yes_pool: u256
     no_pool: u256
     resolved_at_unix: u256
+    winner_pool_remaining: u256
+    loser_pool_remaining: u256
 
 
 @allow_storage
@@ -108,7 +117,9 @@ class ParishMarkets(gl.Contract):
             "closes_at_unix": str(market.closes_at_unix), "created_at_unix": str(market.created_at_unix),
             "status": market.status, "outcome": market.outcome, "reasoning": market.reasoning,
             "yes_pool": str(market.yes_pool), "no_pool": str(market.no_pool),
-            "resolved_at_unix": str(market.resolved_at_unix)}, sort_keys=True)
+            "resolved_at_unix": str(market.resolved_at_unix),
+            "winner_pool_remaining": str(market.winner_pool_remaining),
+            "loser_pool_remaining": str(market.loser_pool_remaining)}, sort_keys=True)
 
     def _evidence_json(self, item: Evidence) -> dict:
         return {"market_id": item.market_id, "index": str(item.index), "author": str(item.author),
@@ -131,6 +142,18 @@ class ParishMarkets(gl.Contract):
             return None
         return self.evidence.get(self._evidence_key(market_id, count - 1))
 
+    def _latest_verified_evidence(self, market_id: str):
+        """The most recent evidence entry that passed its submission-time
+        HTTPS/status/consensus check. Records that failed verification at
+        submission time are kept in history for transparency but are never
+        fed into a resolution."""
+        count = self._evidence_count(market_id)
+        for index in range(count - 1, -1, -1):
+            item = self.evidence.get(self._evidence_key(market_id, index))
+            if item is not None and item.verified:
+                return item
+        return None
+
     @gl.public.write
     def create_market(self, question: str, rules: str, category: str, place: str, primary_source_url: str, resolution_mode: str, closes_at_unix: str) -> str:
         if len(question) < 10 or len(question) > 240:
@@ -141,13 +164,15 @@ class ParishMarkets(gl.Contract):
             raise Exception("Resolution mode must be WEB, EVIDENCE, or HYBRID.")
         if len(category) > 40 or len(place) > 120 or len(primary_source_url) > 500:
             raise Exception("One of the market fields is too long.")
+        if resolution_mode in ("WEB", "HYBRID") and primary_source_url == "":
+            raise Exception("WEB and HYBRID markets require a primary source URL.")
         closes = u256(int(closes_at_unix))
         now = self._now()
         if closes < now + u256(300):
             raise Exception("Close time must be at least five minutes from now.")
         market_id = "m-" + str(self.market_count + u256(1))
         self.markets[market_id] = Market(market_id, gl.message.sender_address, question, rules, category, place,
-            primary_source_url, resolution_mode, closes, now, "OPEN", "", "", u256(0), u256(0), u256(0))
+            primary_source_url, resolution_mode, closes, now, "OPEN", "", "", u256(0), u256(0), u256(0), u256(0), u256(0))
         self.market_count = self.market_count + u256(1)
         self.market_ids.append(market_id)
         return market_id
@@ -196,8 +221,8 @@ class ParishMarkets(gl.Contract):
     @gl.public.write
     def submit_evidence(self, market_id: str, url: str, note: str) -> str:
         market = self.markets.get(market_id)
-        if market is None or market.status not in ("OPEN", "CLOSED"):
-            raise Exception("Evidence can only be submitted to an open or closed market.")
+        if market is None or market.status != "OPEN" or self._now() >= market.closes_at_unix:
+            raise Exception("Evidence can only be submitted to an open market before its deadline.")
         if len(url) < 8 or len(url) > 500 or len(note) < 1 or len(note) > 1000:
             raise Exception("Evidence URL or note has an invalid length.")
         if not (url.startswith("http://") or url.startswith("https://")):
@@ -255,6 +280,12 @@ class ParishMarkets(gl.Contract):
         market.resolved_at_unix = self._now()
         self.markets[market_id] = market
 
+    def _void_market(self, market: Market, reasoning: str, outcome: str = "") -> None:
+        market.outcome = outcome
+        market.status = "VOID"
+        market.reasoning = reasoning
+        market.resolved_at_unix = self._now()
+
     @gl.public.write
     def resolve(self, market_id: str) -> str:
         market = self.markets.get(market_id)
@@ -267,9 +298,27 @@ class ParishMarkets(gl.Contract):
         if market.status == "OPEN":
             market.status = "CLOSED"
         question, rules, mode, source = market.question, market.rules, market.resolution_mode, market.primary_source_url
-        latest = self._latest_evidence(market_id)
+        latest = self._latest_verified_evidence(market_id)
         evidence_url = "" if latest is None else latest.url
         evidence_note = "" if latest is None else latest.note
+        evidence_hash = "" if latest is None else latest.content_hash
+
+        # Enforce that the resolution mode actually has the source material it
+        # promises, deterministically (no fetch/LLM needed to know this) — a
+        # market can't be steered to UNRESOLVED-by-starvation-of-material and
+        # then quietly resolved anyway on whatever happens to be present.
+        if mode == "WEB" and source == "":
+            self._void_market(market, "Resolution mode is WEB but no primary source URL was ever provided.")
+            self.markets[market_id] = market
+            return json.dumps({"id": market.id, "status": market.status, "outcome": market.outcome}, sort_keys=True)
+        if mode == "EVIDENCE" and evidence_url == "":
+            self._void_market(market, "Resolution mode is EVIDENCE but no verified evidence was ever submitted.")
+            self.markets[market_id] = market
+            return json.dumps({"id": market.id, "status": market.status, "outcome": market.outcome}, sort_keys=True)
+        if mode == "HYBRID" and source == "" and evidence_url == "":
+            self._void_market(market, "Resolution mode is HYBRID but neither a primary source nor verified evidence was ever provided.")
+            self.markets[market_id] = market
+            return json.dumps({"id": market.id, "status": market.status, "outcome": market.outcome}, sort_keys=True)
 
         def nondet() -> str:
             def fetch(target_url: str) -> tuple[str, bool]:
@@ -279,12 +328,28 @@ class ParishMarkets(gl.Contract):
                     except Exception:
                         continue
                 return "", False
+
+            def fetch_verified(target_url: str, expected_hash: str) -> tuple[str, bool]:
+                # Evidence is only trusted at resolution time if a fresh fetch still
+                # hashes to what was recorded at submission time; content that has
+                # since changed (or vanished) is treated as unusable, not silently
+                # re-trusted from whatever it now says.
+                for _ in range(FETCH_ATTEMPTS):
+                    try:
+                        body = gl.nondet.web.get(target_url).body[:20000]
+                        if hashlib.sha256(body).hexdigest() != expected_hash:
+                            return "", False
+                        return body.decode()[:6000], True
+                    except Exception:
+                        continue
+                return "", False
+
             primary_text, primary_ok = "", True
             evidence_text, evidence_ok = "", True
             if mode in ("WEB", "HYBRID") and source != "":
                 primary_text, primary_ok = fetch(source)
             if mode in ("EVIDENCE", "HYBRID") and evidence_url != "":
-                evidence_text, evidence_ok = fetch(evidence_url)
+                evidence_text, evidence_ok = fetch_verified(evidence_url, evidence_hash)
             required_ok = primary_ok and evidence_ok
             if not required_ok and primary_text == "" and evidence_text == "":
                 return json.dumps({"outcome": "UNRESOLVED"}, sort_keys=True)
@@ -300,26 +365,35 @@ class ParishMarkets(gl.Contract):
                 outcome = "UNRESOLVED"
             return json.dumps({"outcome": outcome}, sort_keys=True)
 
-        consensus = json.loads(gl.eq_principle.strict_eq(nondet))
-        outcome = consensus["outcome"]
+        outcome = "UNRESOLVED"
+        last_consensus_error = ""
+        for _ in range(CONSENSUS_ATTEMPTS):
+            try:
+                outcome = json.loads(gl.eq_principle.strict_eq(nondet))["outcome"]
+                last_consensus_error = ""
+                break
+            except Exception as exc:
+                last_consensus_error = str(exc)[:200]
         market.resolved_at_unix = self._now()
-        if outcome == "YES" and market.yes_pool > u256(0):
+        if last_consensus_error:
+            self._void_market(market, "Validators could not reach consensus on a verdict (" + last_consensus_error + "); stakes were refunded.")
+        elif outcome == "YES" and market.yes_pool > u256(0):
             market.outcome, market.status = "YES", "RESOLVED"
             market.reasoning = "Resolved YES by validator consensus from the configured sources."
+            market.winner_pool_remaining, market.loser_pool_remaining = market.yes_pool, market.no_pool
         elif outcome == "NO" and market.no_pool > u256(0):
             market.outcome, market.status = "NO", "RESOLVED"
             market.reasoning = "Resolved NO by validator consensus from the configured sources."
+            market.winner_pool_remaining, market.loser_pool_remaining = market.no_pool, market.yes_pool
         elif outcome in ("YES", "NO"):
-            market.outcome, market.status = outcome, "VOID"
-            market.reasoning = "Validators found " + outcome + ", but the winning side had no stakes; all stakes were refunded."
+            self._void_market(market, "Validators found " + outcome + ", but the winning side had no stakes; all stakes were refunded.", outcome=outcome)
         else:
-            market.outcome, market.status = outcome, "VOID"
-            market.reasoning = "Validators could not reach a YES/NO verdict from the available sources; stakes were refunded."
+            self._void_market(market, "Validators could not reach a YES/NO verdict from the available sources; stakes were refunded.", outcome=outcome)
         self.markets[market_id] = market
         return json.dumps({"id": market.id, "status": market.status, "outcome": market.outcome}, sort_keys=True)
 
     @gl.public.write
-    def claim(self, market_id: str) -> None:
+    def claim(self, market_id: str) -> str:
         market = self.markets.get(market_id)
         if market is None or market.status not in SETTLED_STATUSES:
             raise Exception("This market is not ready to claim.")
@@ -330,15 +404,27 @@ class ParishMarkets(gl.Contract):
         payout = u256(0)
         if market.status in REFUND_STATUSES:
             payout = position.yes_amount + position.no_amount
-        elif market.outcome == "YES" and market.yes_pool > u256(0):
-            payout = position.yes_amount + (position.yes_amount * market.no_pool // market.yes_pool)
-        elif market.outcome == "NO" and market.no_pool > u256(0):
-            payout = position.no_amount + (position.no_amount * market.yes_pool // market.no_pool)
-        if payout == u256(0):
-            raise Exception("This position lost; there is nothing to claim.")
+        elif market.outcome == "YES" and position.yes_amount > u256(0) and market.winner_pool_remaining > u256(0):
+            stake = position.yes_amount
+            payout = stake + (stake * market.loser_pool_remaining // market.winner_pool_remaining)
+            market.loser_pool_remaining = market.loser_pool_remaining - (payout - stake)
+            market.winner_pool_remaining = market.winner_pool_remaining - stake
+            self.markets[market_id] = market
+        elif market.outcome == "NO" and position.no_amount > u256(0) and market.winner_pool_remaining > u256(0):
+            stake = position.no_amount
+            payout = stake + (stake * market.loser_pool_remaining // market.winner_pool_remaining)
+            market.loser_pool_remaining = market.loser_pool_remaining - (payout - stake)
+            market.winner_pool_remaining = market.winner_pool_remaining - stake
+            self.markets[market_id] = market
+        # A position on the losing side (or a winning side with zero stake) is
+        # a legitimate terminal outcome, not an error: mark it claimed with a
+        # zero payout so it settles for good instead of being left in an
+        # ambiguous unclaimed state that keeps reverting forever.
         position.claimed = True
         self.positions[key] = position
-        Recipient(gl.message.sender_address).emit_transfer(value=payout)
+        if payout > u256(0):
+            Recipient(gl.message.sender_address).emit_transfer(value=payout)
+        return json.dumps({"market_id": market_id, "payout": str(payout), "claimed": True}, sort_keys=True)
 
     @gl.public.view
     def get_market(self, market_id: str) -> str:
