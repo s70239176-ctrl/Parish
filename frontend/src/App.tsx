@@ -29,14 +29,21 @@ export default function App() {
       hash = txHash
       setNotice({text:'Transaction submitted — waiting for finalization…', hash: txHash, outcome:'pending'})
       const result = await waitUntilFinal(txHash)
-      if (result.outcome !== 'finalized') {
-        const label = result.outcome === 'timeout' ? 'Timed out waiting for finalization.' : result.outcome === 'rejected' ? 'Transaction was rejected.' : 'Transaction failed.'
-        setNotice({text: `${label} ${result.detail}`.trim(), hash: txHash, outcome: result.outcome})
-        throw new Error(result.detail)
-      }
-      setNotice({text:'Finalized on Studionet.', hash: txHash, outcome:'finalized'})
+      // Refresh regardless of outcome: a poll that couldn't confirm the result
+      // ("unknown"/"timeout") doesn't mean the write didn't land on-chain, so the
+      // board should reflect real chain state either way instead of needing a
+      // manual page refresh to catch up.
       await refresh()
       if (wallet) setBalance(await getBalance(wallet))
+      if (result.outcome !== 'finalized') {
+        const label = result.outcome === 'timeout' ? 'Timed out waiting to confirm — check below, it may have already gone through.'
+          : result.outcome === 'unknown' ? "Couldn't confirm the result — check below, it may have already gone through."
+          : result.outcome === 'rejected' ? 'Transaction was rejected.' : 'Transaction failed.'
+        setNotice({text: `${label} ${result.detail}`.trim(), hash: txHash, outcome: result.outcome})
+        if (result.outcome === 'rejected' || result.outcome === 'failed') throw new Error(result.detail)
+        return
+      }
+      setNotice({text:'Finalized on Studionet.', hash: txHash, outcome:'finalized'})
     } catch(e) {
       setNotice(prev => (prev && prev.hash === hash && prev.outcome && prev.outcome !== 'pending') ? prev : {text: errorMessage(e), hash})
       throw e

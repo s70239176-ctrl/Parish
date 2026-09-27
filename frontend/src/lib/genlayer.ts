@@ -17,7 +17,7 @@ export const EXPLORER_BASE = 'https://explorer-studio.genlayer.com'
 export const explorerTxUrl = (hash: string) => `${EXPLORER_BASE}/tx/${hash}`
 export const explorerAddressUrl = (address: string) => `${EXPLORER_BASE}/address/${address}`
 
-export type TxOutcome = 'pending' | 'finalized' | 'rejected' | 'failed' | 'timeout'
+export type TxOutcome = 'pending' | 'finalized' | 'rejected' | 'failed' | 'timeout' | 'unknown'
 export type TxResult = { hash: Hash; outcome: TxOutcome; detail: string }
 
 export const errorMessage = (error: unknown) => {
@@ -38,13 +38,13 @@ const isTransientRpcError = (error: unknown) => {
   return ['network', 'fetch failed', 'timeout', 'timed out', 'econnreset', 'econnrefused', 'failed to fetch', '429', '503', '502', 'rate limit', 'disconnected'].some(needle => message.includes(needle))
 }
 
-async function withRpcRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+async function withRpcRetry<T>(fn: () => Promise<T>, attempts = 3, opts: { retryAll?: boolean } = {}): Promise<T> {
   let lastError: unknown
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try { return await fn() }
     catch (error) {
       lastError = error
-      if (attempt === attempts || !isTransientRpcError(error)) throw error
+      if (attempt === attempts || (!opts.retryAll && !isTransientRpcError(error))) throw error
       await new Promise(resolve => setTimeout(resolve, 300 * attempt))
     }
   }
@@ -94,18 +94,23 @@ const FINALIZATION_TIMEOUT_MS = 120_000
 export async function waitUntilFinal(hash: Hash): Promise<TxResult> {
   let receipt: Awaited<ReturnType<ReturnType<typeof getReadClient>['waitForTransactionReceipt']>>
   try {
+    // GenLayer consensus (propose/commit/reveal across validators) can legitimately
+    // take a while, and a single poll can flake for reasons that have nothing to do
+    // with whether the transaction itself succeeds — so any error here is retried
+    // (retryAll) rather than only ones that look network-shaped, and a failure to
+    // confirm is reported as "unknown", never as a false "failed".
     receipt = await Promise.race([
-      withRpcRetry(() => getReadClient().waitForTransactionReceipt({ hash, status: TransactionStatus.FINALIZED })),
+      withRpcRetry(() => getReadClient().waitForTransactionReceipt({ hash, status: TransactionStatus.FINALIZED }), 4, { retryAll: true }),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('__timeout__')), FINALIZATION_TIMEOUT_MS)),
     ])
   } catch (error) {
-    if (errorMessage(error) === '__timeout__') return { hash, outcome: 'timeout', detail: `Still waiting for finalization after ${FINALIZATION_TIMEOUT_MS / 1000}s — it may still land.` }
-    return { hash, outcome: 'failed', detail: errorMessage(error) }
+    if (errorMessage(error) === '__timeout__') return { hash, outcome: 'timeout', detail: `Still waiting for finalization after ${FINALIZATION_TIMEOUT_MS / 1000}s — check the explorer link, it may already have landed.` }
+    return { hash, outcome: 'unknown', detail: `Could not confirm the result (${errorMessage(error)}). Check the explorer link — it may have already succeeded.` }
   }
   const resultName = receipt.txExecutionResultName || receipt.statusName || 'unknown result'
   if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_RETURN) return { hash, outcome: 'finalized', detail: resultName }
-  const rejected = /reject/i.test(resultName)
-  return { hash, outcome: rejected ? 'rejected' : 'failed', detail: resultName }
+  if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) return { hash, outcome: /reject/i.test(resultName) ? 'rejected' : 'failed', detail: resultName }
+  return { hash, outcome: 'unknown', detail: resultName }
 }
 
 export function watchWalletEvents(handlers: { onAccountsChanged?: (accounts: string[]) => void; onChainChanged?: (chainId: string) => void }) {
