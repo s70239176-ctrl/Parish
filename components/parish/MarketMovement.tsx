@@ -1,0 +1,3 @@
+import { ArrowUpRight } from 'lucide-react'
+
+export function MarketMovement() { return <div className="movement" aria-label="Live market movement"><div><p>Parish live market <b>(Civic)</b></p><strong>+12.4%</strong><ArrowUpRight size={13} /></div><div><p>Taco truck <b>(Food)</b></p><strong>+8.7%</strong><ArrowUpRight size={13} /></div><div><p>Corner store <b>(Civic)</b></p><strong>+5.1%</strong><ArrowUpRight size={13} /></div><div><p>Library <b>(Git)</b></p><strong>+9.8%</strong><ArrowUpRight size={13} /></div><div><p>Eagles game <b>(Sports)</b></p><strong>+0.0%</strong><ArrowUpRight size={13} /></div></div> }

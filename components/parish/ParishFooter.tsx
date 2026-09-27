@@ -1,0 +1,1 @@
+export function ParishFooter() { return <footer><b>✦ PARISH</b><span>LOCAL PREDICTIONS. REAL IMPACT.</span><nav><a href="#about">About</a><a href="#help">Help</a><a href="#terms">Terms</a><a href="#privacy">Privacy</a><a aria-label="X / Twitter" href="#x">𝕏</a></nav></footer> }
