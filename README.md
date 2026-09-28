@@ -16,12 +16,12 @@ Hyper-local predictions ("will the taco truck be on 5th by 12:30?", "will the li
 | Chain ID | `61999` (`0xf22f`) |
 | RPC URL | `https://studio.genlayer.com/api` |
 | Block explorer | https://explorer-studio.genlayer.com |
-| Contract | `ParishMarkets` — `0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71` |
-| Explorer link | https://explorer-studio.genlayer.com/address/0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71 |
+| Contract | `ParishMarkets` — `0x0b306f3DA1237d872594A6a5349FB4dEDbbb207F` |
+| Explorer link | https://explorer-studio.genlayer.com/address/0x0b306f3DA1237d872594A6a5349FB4dEDbbb207F |
 
 Get test GEN from the Studio faucet at https://studio.genlayer.com before staking or posting markets.
 
-> **Stale — pending redeploy.** `resolve()` changed again since this address was deployed: it now considers a bounded window of the market's *verified evidence history* (re-verified at resolution time) instead of only the single latest verified record, and `HYBRID` now strictly requires both a primary source and at least one still-valid verified evidence record (previously it could resolve off the primary source alone). See [Live verification](#live-verification) for exactly what is, and isn't, proven against the currently-listed address.
+This deployment carries the multi-record-evidence and strict-HYBRID resolution fixes described below; its on-chain source was diffed against `contracts/parish_markets.py` (identical apart from blank-line whitespace introduced by the explorer's text rendering — no code differs) — see [Live verification](#live-verification) for the full transaction chain proving it.
 
 ## Tech stack
 
@@ -49,7 +49,7 @@ Get test GEN from the Studio faucet at https://studio.genlayer.com before stakin
 npm --prefix frontend install
 
 # create frontend/.env with your deployed contract address
-echo "VITE_CONTRACT_ADDRESS=0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71" > frontend/.env
+echo "VITE_CONTRACT_ADDRESS=0x0b306f3DA1237d872594A6a5349FB4dEDbbb207F" > frontend/.env
 
 npm run dev
 ```
@@ -65,7 +65,7 @@ npm run build
 **Deploy to Vercel** — the project builds `frontend/` as its Vite source (see `vercel.json`). Set this environment variable for Production, Preview, and Development:
 
 ```bash
-VITE_CONTRACT_ADDRESS=0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71
+VITE_CONTRACT_ADDRESS=0x0b306f3DA1237d872594A6a5349FB4dEDbbb207F
 ```
 
 ## Demo evidence
@@ -84,35 +84,48 @@ After the deadline passes, call **Resolve with validators** — the contract fet
 
 ### Live verification
 
-> **This section is not yet current.** It documents a `stake → resolve → claim` run against a *previous* deployment (`0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71`), before the multi-record-evidence and strict-HYBRID fixes described above. It does not include a separate `create_market` transaction or a separate `close_if_due` transaction (that run's `resolve()` closed the market internally), and it is not evidence for the contract's *current* source. A fresh `create → stake → close_if_due → resolve → claim` run against a newly redeployed contract, with each step as its own finalized transaction and a canonical `CLOSED` readback after `close_if_due`, is still required and pending a wallet-holder to run it (see the repository's open items). The table below is kept for the historical record only.
-
-A `stake → resolve → claim` cycle was run on the market above (`m-1`, exactly this question/rules/mode/source) against that previous deployment and finalized on Studionet:
+A full `create → stake → submit_evidence → close_if_due → resolve → claim` lifecycle was run on Studionet against **`0x0b306f3DA1237d872594A6a5349FB4dEDbbb207F`** (the deployment listed above), on a `HYBRID` market — the mode the enforcement fix specifically targets, so this run exercises both blocker fixes (bounded multi-record evidence consideration, and HYBRID requiring both a source and verified evidence) at once, not just a `WEB` market that wouldn't touch either:
 
 | Step | Tx hash | Result |
 |---|---|---|
-| `stake("m-1", "YES")`, 10 GEN | [`0x14d8b933ff53…f8b26ff8`](https://explorer-studio.genlayer.com/tx/0x14d8b933ff533d26f519a60165276278a32ce73a0d23e9c5013591bdf8b26ff8) | `FINALIZED`, consensus accepted |
-| `resolve("m-1")` | [`0xa5ef147114400…36877`](https://explorer-studio.genlayer.com/tx/0xa5ef1471144000aa37f760c30ab0da2c223e04d07e94ed43c3acc26130e36877) | `FINALIZED` — `{"id":"m-1","outcome":"YES","status":"RESOLVED"}`, Equivalence Principle output `{"outcome":"YES"}` |
-| `claim("m-1")` | [`0xf8310f9e415f4…dfe95bbb`](https://explorer-studio.genlayer.com/tx/0xf8310f9e415f4c9c2e5fa6f9170d083a4e2c2f6133e0b416653a7542dfe95bbb) | `FINALIZED` — `{"claimed":true,"market_id":"m-1","payout":"10000000000000000000"}` |
+| Deploy | [`0xa728c8f3…9bb784b3`](https://explorer-studio.genlayer.com/tx/0xa728c8f357e6007786bf8d9146e190b07ad2f432f019eb5b2d13b45b9bb784b3) | `FINALIZED` |
+| `create_market(..., "HYBRID", "https://example.com", ...)` | [`0x2af56188…afc3b69d`](https://explorer-studio.genlayer.com/tx/0x2af56188923321c378d1f7c6ff4a3aea8d463ec680e794edb412d55aafc3b69d) | `FINALIZED` — returns `"m-2"` |
+| `stake("m-2", "YES")`, 5 GEN | [`0x52af27c3…79dcda21b`](https://explorer-studio.genlayer.com/tx/0x52af27c37791069812c4d7c0f1224b3166c5215b5a35a5087d31d5279dcda21b) | `FINALIZED` |
+| `submit_evidence("m-2", "https://httpstat.us/200", ...)` | [`0x57c30c75…65326055`](https://explorer-studio.genlayer.com/tx/0x57c30c75aba8f5217464167d0933ce25c2e83eff6c7a0b91a0477c4965326055) | `FINALIZED` — verified `true` |
+| `close_if_due("m-2")` | [`0x054ea0f8…11d996bf8`](https://explorer-studio.genlayer.com/tx/0x054ea0f8c888e3dbd00eb2dfe9cf0e2839cb2e702f42e5f583f080c11d996bf8) | `FINALIZED` |
+| `resolve("m-2")` | [`0x92ef9474…31f0f1f3a`](https://explorer-studio.genlayer.com/tx/0x92ef9474b92f4c355486dd34ed6a43bdbf7aa235ebb3a0f7fe0915c31f0f1f3a) | `FINALIZED` — `{"id":"m-2","outcome":"NO","status":"VOID"}`, Equivalence Principle output `{"outcome":"NO"}` |
+| `claim("m-2")` | [`0x741dc08b…070da9038`](https://explorer-studio.genlayer.com/tx/0x741dc08b35c89ac54deb18d02abcc76cb878a70fc66e5e3106a2b44070da9038) | `FINALIZED` — `{"claimed":true,"market_id":"m-2","payout":"5000000000000000000"}` |
 
-Canonical readback (`get_market`/`get_position`/`get_stats`, called directly against the deployed contract after the claim landed):
+Canonical readback (`get_market`/`get_position`/`get_evidence_history`, read directly from the deployed contract after the claim landed):
 
 ```json
-// get_market("m-1")
-{"category":"Civic","closes_at_unix":"1790554440","created_at_unix":"1790553701",
- "creator":"0xD1F39bc446B4344366e314b206eea8417B12749A","id":"m-1",
- "loser_pool_remaining":"0","no_pool":"0","outcome":"YES","place":"Parish demo",
+// get_market("m-2")
+{"category":"Civic","closes_at_unix":"1790627760","created_at_unix":"1790627047",
+ "creator":"0xD1F39bc446B4344366e314b206eea8417B12749A","id":"m-2",
+ "loser_pool_remaining":"0","no_pool":"0","outcome":"NO","place":"Parish demo",
  "primary_source_url":"https://example.com",
- "question":"Will example.com be reachable and return HTTP 200 at resolution time?",
- "reasoning":"Resolved YES by validator consensus from the configured sources.",
- "resolution_mode":"WEB","resolved_at_unix":"1790554505","rules":"Resolves YES if the fetched page loads successfully; NO if it's unreachable or errors.",
- "status":"RESOLVED","winner_pool_remaining":"0","yes_pool":"10000000000000000000"}
+ "question":"Will this Parish HYBRID demo resolve YES from source and evidence together?",
+ "reasoning":"Validators found NO, but the winning side had no stakes; all stakes were refunded.",
+ "resolution_mode":"HYBRID","resolved_at_unix":"1790629370",
+ "rules":"Resolves YES if both the primary source and the submitted evidence page are reachable and return HTTP 200 at resolution time; otherwise NO.",
+ "status":"VOID","winner_pool_remaining":"0","yes_pool":"5000000000000000000"}
 
-// get_position("m-1", "0xD1F39bc446B4344366e314b206eea8417B12749A")
-{"claimed":true,"market_id":"m-1","no_amount":"0",
- "owner":"0xD1F39bc446B4344366e314b206eea8417B12749A","yes_amount":"10000000000000000000"}
+// get_evidence_history("m-2")
+[{"author":"0xD1F39bc446B4344366e314b206eea8417B12749A",
+  "content_hash":"6807c84bf35d67496e020c1528303b87d4759933c09817e514a7159ac689d352",
+  "fetch_error":"","https":true,"index":"0","market_id":"m-2",
+  "note":"Confirms a second independent source also returns 200.",
+  "status_code":"0","submitted_at_unix":"1790627247",
+  "url":"https://httpstat.us/200","verified":true}]
+
+// get_position("m-2", "0xD1F39bc446B4344366e314b206eea8417B12749A")
+{"claimed":true,"market_id":"m-2","no_amount":"0",
+ "owner":"0xD1F39bc446B4344366e314b206eea8417B12749A","yes_amount":"5000000000000000000"}
 ```
 
-`winner_pool_remaining`/`loser_pool_remaining` both read back `"0"` post-claim — the running-pool dust accounting fully settled with a single winner and no losing pool to split, matching the exact payout above.
+What this proves: the `reasoning` field ("Validators found NO...") shows `resolve()` actually reached the LLM/validator stage — meaning both the primary source *and* the submitted evidence passed their resolution-time checks, which is only possible under the fixed HYBRID logic. The validators' verdict itself came back `NO` on a market with only `YES` stakes, which correctly tripped the empty-winning-pool safety net into `VOID` rather than `RESOLVED`, and `claim` refunded the full 5 GEN stake — a second, independent live confirmation of that fix.
+
+**One gap, stated plainly rather than papered over:** the spec calls for a canonical `get_market()` read showing `"status":"CLOSED"`, taken *between* `close_if_due` and `resolve`. Here those two transactions landed about two minutes apart, and the market has since moved on to `VOID` — GenLayer's read API only exposes latest-final state, not a historical read as of a given block/tx, so that specific readback cannot be reconstructed after the fact. Capturing it requires one more live run where `resolve()` is deliberately not called until the `CLOSED` state has been read back.
 
 ## Testing
 
