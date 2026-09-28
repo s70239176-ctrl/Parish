@@ -16,12 +16,12 @@ Hyper-local predictions ("will the taco truck be on 5th by 12:30?", "will the li
 | Chain ID | `61999` (`0xf22f`) |
 | RPC URL | `https://studio.genlayer.com/api` |
 | Block explorer | https://explorer-studio.genlayer.com |
-| Contract | `ParishMarkets` — `0x02444230372B528541561FE107c4abE11b68239C` |
-| Explorer link | https://explorer-studio.genlayer.com/address/0x02444230372B528541561FE107c4abE11b68239C |
+| Contract | `ParishMarkets` — `0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71` |
+| Explorer link | https://explorer-studio.genlayer.com/address/0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71 |
 
 Get test GEN from the Studio faucet at https://studio.genlayer.com before staking or posting markets.
 
-> **Note:** the address above was deployed before the evidence-verification, resolution-mode-enforcement, consensus-retry, and dust-free-settlement fixes, which changed `Market`'s storage layout (new `winner_pool_remaining`/`loser_pool_remaining` fields) and `claim`'s/`submit_evidence`'s signatures. It needs to be **redeployed** before those fixes are live; update this table and `frontend/.env`/Vercel's `VITE_CONTRACT_ADDRESS` once that happens.
+This is the contract redeployed with the evidence-verification, resolution-mode-enforcement, consensus-retry, and dust-free-settlement fixes (new `Market.winner_pool_remaining`/`loser_pool_remaining` fields, and `claim`'s/`submit_evidence`'s new return signatures) — see [Demo evidence](#demo-evidence) below for a finalized live run against it.
 
 ## Tech stack
 
@@ -49,7 +49,7 @@ Get test GEN from the Studio faucet at https://studio.genlayer.com before stakin
 npm --prefix frontend install
 
 # create frontend/.env with your deployed contract address
-echo "VITE_CONTRACT_ADDRESS=0x02444230372B528541561FE107c4abE11b68239C" > frontend/.env
+echo "VITE_CONTRACT_ADDRESS=0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71" > frontend/.env
 
 npm run dev
 ```
@@ -65,7 +65,7 @@ npm run build
 **Deploy to Vercel** — the project builds `frontend/` as its Vite source (see `vercel.json`). Set this environment variable for Production, Preview, and Development:
 
 ```bash
-VITE_CONTRACT_ADDRESS=0x02444230372B528541561FE107c4abE11b68239C
+VITE_CONTRACT_ADDRESS=0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71
 ```
 
 ## Demo evidence
@@ -81,6 +81,36 @@ To see a full create → stake → resolve → claim cycle quickly, post a marke
 - **Close time:** 5–10 minutes out (the minimum allowed)
 
 After the deadline passes, call **Resolve with validators** — the contract fetches `https://example.com`, the LLM judges reachability from the fetched body, and validators reach consensus on `YES`. For `EVIDENCE` or `HYBRID` markets, submit any short evidence URL and a one-line note before resolving so the resolver has something to read.
+
+### Live verification (against `0xA572dAeDbEE1cD5D12801BA5D0f42DF3D96f5D71`)
+
+A full `stake → resolve → claim` cycle was run on the market above (`m-1`, exactly this question/rules/mode/source) and finalized on Studionet:
+
+| Step | Tx hash | Result |
+|---|---|---|
+| `stake("m-1", "YES")`, 10 GEN | [`0x14d8b933ff53…f8b26ff8`](https://explorer-studio.genlayer.com/tx/0x14d8b933ff533d26f519a60165276278a32ce73a0d23e9c5013591bdf8b26ff8) | `FINALIZED`, consensus accepted |
+| `resolve("m-1")` | [`0xa5ef147114400…36877`](https://explorer-studio.genlayer.com/tx/0xa5ef1471144000aa37f760c30ab0da2c223e04d07e94ed43c3acc26130e36877) | `FINALIZED` — `{"id":"m-1","outcome":"YES","status":"RESOLVED"}`, Equivalence Principle output `{"outcome":"YES"}` |
+| `claim("m-1")` | [`0xf8310f9e415f4…dfe95bbb`](https://explorer-studio.genlayer.com/tx/0xf8310f9e415f4c9c2e5fa6f9170d083a4e2c2f6133e0b416653a7542dfe95bbb) | `FINALIZED` — `{"claimed":true,"market_id":"m-1","payout":"10000000000000000000"}` |
+
+Canonical readback (`get_market`/`get_position`/`get_stats`, called directly against the deployed contract after the claim landed):
+
+```json
+// get_market("m-1")
+{"category":"Civic","closes_at_unix":"1790554440","created_at_unix":"1790553701",
+ "creator":"0xD1F39bc446B4344366e314b206eea8417B12749A","id":"m-1",
+ "loser_pool_remaining":"0","no_pool":"0","outcome":"YES","place":"Parish demo",
+ "primary_source_url":"https://example.com",
+ "question":"Will example.com be reachable and return HTTP 200 at resolution time?",
+ "reasoning":"Resolved YES by validator consensus from the configured sources.",
+ "resolution_mode":"WEB","resolved_at_unix":"1790554505","rules":"Resolves YES if the fetched page loads successfully; NO if it's unreachable or errors.",
+ "status":"RESOLVED","winner_pool_remaining":"0","yes_pool":"10000000000000000000"}
+
+// get_position("m-1", "0xD1F39bc446B4344366e314b206eea8417B12749A")
+{"claimed":true,"market_id":"m-1","no_amount":"0",
+ "owner":"0xD1F39bc446B4344366e314b206eea8417B12749A","yes_amount":"10000000000000000000"}
+```
+
+`winner_pool_remaining`/`loser_pool_remaining` both read back `"0"` post-claim — the running-pool dust accounting fully settled with a single winner and no losing pool to split, matching the exact payout above.
 
 ## Testing
 
