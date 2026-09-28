@@ -7,4 +7,5 @@ frontend/vite.config.d.ts
 contracts/__pycache__/
 tests/__pycache__/
 .pytest_cache/
+artifacts/
 work/

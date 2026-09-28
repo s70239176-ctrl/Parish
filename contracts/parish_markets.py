@@ -24,6 +24,17 @@ FETCH_ATTEMPTS = 3
 # majority agreement across validators), and that needs its own bounded
 # retry/fallback so a real consensus failure still reaches a terminal state.
 CONSENSUS_ATTEMPTS = 2
+# How many of a market's most recent verified evidence submissions resolve()
+# will ever re-fetch/re-verify. Evidence history itself can hold up to
+# MAX_EVIDENCE_PER_MARKET entries, but a resolution only ever has to do a
+# bounded amount of work regardless of that — this caps it independent of
+# history size, so a market can't be griefed into unbounded validator work
+# by spamming evidence right up to the cap.
+MAX_EVIDENCE_CONSIDERED = 5
+# Per-entry text truncation when several evidence records are combined into
+# one resolver prompt, so the combined prompt stays bounded even at
+# MAX_EVIDENCE_CONSIDERED entries.
+EVIDENCE_TEXT_CHARS = 2000
 
 
 @allow_storage
@@ -144,15 +155,33 @@ class ParishMarkets(gl.Contract):
 
     def _latest_verified_evidence(self, market_id: str):
         """The most recent evidence entry that passed its submission-time
-        HTTPS/status/consensus check. Records that failed verification at
-        submission time are kept in history for transparency but are never
-        fed into a resolution."""
+        HTTPS/status/consensus check. Used only for the `get_evidence` view
+        (a quick "what's the newest verified note" read) — resolution itself
+        uses `_verified_evidence_candidates` to consider more than one."""
         count = self._evidence_count(market_id)
         for index in range(count - 1, -1, -1):
             item = self.evidence.get(self._evidence_key(market_id, index))
             if item is not None and item.verified:
                 return item
         return None
+
+    def _verified_evidence_candidates(self, market_id: str):
+        """The evidence entries a resolution is allowed to consider: those
+        marked verified at submission time, within the most recent
+        MAX_EVIDENCE_CONSIDERED submissions (oldest of that window first, so
+        ordering is deterministic and earlier valid evidence isn't dropped
+        just because a later record also exists). Bounded independent of how
+        large the market's full evidence history is."""
+        count = self._evidence_count(market_id)
+        start = count - MAX_EVIDENCE_CONSIDERED
+        if start < 0:
+            start = 0
+        candidates = []
+        for index in range(start, count):
+            item = self.evidence.get(self._evidence_key(market_id, index))
+            if item is not None and item.verified:
+                candidates.append(item)
+        return candidates
 
     @gl.public.write
     def create_market(self, question: str, rules: str, category: str, place: str, primary_source_url: str, resolution_mode: str, closes_at_unix: str) -> str:
@@ -298,25 +327,32 @@ class ParishMarkets(gl.Contract):
         if market.status == "OPEN":
             market.status = "CLOSED"
         question, rules, mode, source = market.question, market.rules, market.resolution_mode, market.primary_source_url
-        latest = self._latest_verified_evidence(market_id)
-        evidence_url = "" if latest is None else latest.url
-        evidence_note = "" if latest is None else latest.note
-        evidence_hash = "" if latest is None else latest.content_hash
+        # The bounded, deterministically-ordered (oldest-of-window first) set of
+        # submission-time-verified evidence a resolution is allowed to draw on.
+        # Whether each one is STILL valid (fetch + hash still match) can only be
+        # known inside the non-deterministic block below, since that needs a
+        # live fetch — this is just "is there anything worth trying".
+        candidates = self._verified_evidence_candidates(market_id)
+        evidence_available = len(candidates) > 0
 
         # Enforce that the resolution mode actually has the source material it
         # promises, deterministically (no fetch/LLM needed to know this) — a
         # market can't be steered to UNRESOLVED-by-starvation-of-material and
         # then quietly resolved anyway on whatever happens to be present.
+        # HYBRID needs BOTH a primary source and verified evidence: it already
+        # requires a source at creation, so what actually gates it here is
+        # evidence, and a HYBRID market must never fall through to resolving
+        # off the primary source alone.
         if mode == "WEB" and source == "":
             self._void_market(market, "Resolution mode is WEB but no primary source URL was ever provided.")
             self.markets[market_id] = market
             return json.dumps({"id": market.id, "status": market.status, "outcome": market.outcome}, sort_keys=True)
-        if mode == "EVIDENCE" and evidence_url == "":
+        if mode == "EVIDENCE" and not evidence_available:
             self._void_market(market, "Resolution mode is EVIDENCE but no verified evidence was ever submitted.")
             self.markets[market_id] = market
             return json.dumps({"id": market.id, "status": market.status, "outcome": market.outcome}, sort_keys=True)
-        if mode == "HYBRID" and source == "" and evidence_url == "":
-            self._void_market(market, "Resolution mode is HYBRID but neither a primary source nor verified evidence was ever provided.")
+        if mode == "HYBRID" and (source == "" or not evidence_available):
+            self._void_market(market, "Resolution mode is HYBRID but requires both a primary source and at least one verified evidence record; one is missing.")
             self.markets[market_id] = market
             return json.dumps({"id": market.id, "status": market.status, "outcome": market.outcome}, sort_keys=True)
 
@@ -339,21 +375,38 @@ class ParishMarkets(gl.Contract):
                         body = gl.nondet.web.get(target_url).body[:20000]
                         if hashlib.sha256(body).hexdigest() != expected_hash:
                             return "", False
-                        return body.decode()[:6000], True
+                        return body.decode()[:EVIDENCE_TEXT_CHARS], True
                     except Exception:
                         continue
                 return "", False
 
-            primary_text, primary_ok = "", True
-            evidence_text, evidence_ok = "", True
-            if mode in ("WEB", "HYBRID") and source != "":
+            primary_needed = mode in ("WEB", "HYBRID")
+            evidence_needed = mode in ("EVIDENCE", "HYBRID")
+
+            primary_text, primary_ok = "", not primary_needed
+            if primary_needed:
                 primary_text, primary_ok = fetch(source)
-            if mode in ("EVIDENCE", "HYBRID") and evidence_url != "":
-                evidence_text, evidence_ok = fetch_verified(evidence_url, evidence_hash)
-            required_ok = primary_ok and evidence_ok
-            if not required_ok and primary_text == "" and evidence_text == "":
+
+            # Re-verify every candidate at resolution time (bounded to at most
+            # MAX_EVIDENCE_CONSIDERED fetches, in the same oldest-first order
+            # computed above) and keep only the ones whose content still
+            # matches their submission-time hash. Several records can end up
+            # feeding the prompt, not just whichever is newest — and a later
+            # record drifting doesn't disqualify an earlier one that still
+            # matches.
+            evidence_parts = []
+            evidence_ok = not evidence_needed
+            if evidence_needed:
+                for candidate in candidates:
+                    text, ok = fetch_verified(candidate.url, candidate.content_hash)
+                    if ok:
+                        evidence_parts.append(candidate.note + ": " + text)
+                        evidence_ok = True
+
+            if not primary_ok or not evidence_ok:
                 return json.dumps({"outcome": "UNRESOLVED"}, sort_keys=True)
-            prompt = "Resolve this YES/NO prediction market using only supplied material. Return JSON with outcome exactly YES, NO, UNRESOLVED, or INVALID, and concise reasoning. Question: " + question + " Rules: " + rules + " Primary: " + primary_text + " Evidence note: " + evidence_note + " Evidence: " + evidence_text
+            evidence_text = " | ".join(evidence_parts)
+            prompt = "Resolve this YES/NO prediction market using only supplied material. Return JSON with outcome exactly YES, NO, UNRESOLVED, or INVALID, and concise reasoning. Question: " + question + " Rules: " + rules + " Primary: " + primary_text + " Evidence: " + evidence_text
             try:
                 parsed = gl.nondet.exec_prompt(prompt, response_format="json")
                 if not isinstance(parsed, dict):

@@ -324,6 +324,178 @@ class TestResolutionSafety:
         assert gl.eq_principle.call_count == 2
 
 
+class TestMultiRecordEvidenceResolution:
+    """resolve() must draw on more than just the single latest verified
+    evidence record: a bounded, deterministically-ordered window of the
+    verified history, each re-verified against its submission-time hash."""
+
+    def _submit(self, contract, as_user, gl, market_id, who, url, note, body=b"stable content", status=200):
+        gl.nondet.web.set_response(url, body, status)
+        as_user(who)
+        return json.loads(contract.submit_evidence(market_id, url, note))
+
+    def test_two_verified_records_both_influence_the_resolution_input(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://one.example", "first clue")
+        self._submit(contract, as_user, gl, market_id, BOB, "https://two.example", "second clue")
+        stake(contract, as_user, market_id, ALICE, "YES")
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "RESOLVED"
+        assert len(gl.nondet.prompts) == 1
+        assert "first clue" in gl.nondet.prompts[0]
+        assert "second clue" in gl.nondet.prompts[0]
+
+    def test_earlier_valid_evidence_is_not_ignored_because_a_later_record_exists(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://earliest.example", "earliest clue")
+        self._submit(contract, as_user, gl, market_id, BOB, "https://latest.example", "latest clue")
+        stake(contract, as_user, market_id, ALICE, "YES")
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        contract.resolve(market_id)
+        # The presence of a later verified record must not have crowded out the earlier one.
+        assert "earliest clue" in gl.nondet.prompts[0]
+
+    def test_drifted_later_evidence_is_excluded_but_earlier_valid_evidence_still_used(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://stable.example", "stable clue", b"original A")
+        self._submit(contract, as_user, gl, market_id, BOB, "https://drifting.example", "drifting clue", b"original B")
+        # The later record's page changes after submission.
+        gl.nondet.web.set_response("https://drifting.example", b"a different body now", 200)
+        stake(contract, as_user, market_id, ALICE, "YES")
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "RESOLVED"
+        assert "stable clue" in gl.nondet.prompts[0]
+        assert "drifting clue" not in gl.nondet.prompts[0]
+
+    def test_unverified_evidence_excluded_even_alongside_verified_evidence(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://good.example", "good clue", b"body", 200)
+        # Not https -> fails submission-time verification regardless of status.
+        self._submit(contract, as_user, gl, market_id, BOB, "http://insecure.example", "bad clue", b"body", 200)
+        stake(contract, as_user, market_id, ALICE, "YES")
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        contract.resolve(market_id)
+        assert "good clue" in gl.nondet.prompts[0]
+        assert "bad clue" not in gl.nondet.prompts[0]
+
+    def test_evidence_is_considered_in_deterministic_ascending_order(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://a.example", "alpha")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://b.example", "beta")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://c.example", "gamma")
+        stake(contract, as_user, market_id, ALICE, "YES")
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        contract.resolve(market_id)
+        prompt = gl.nondet.prompts[0]
+        assert prompt.index("alpha") < prompt.index("beta") < prompt.index("gamma")
+
+    def test_evidence_considered_is_bounded_independent_of_history_size(self, contract, as_user, clock, gl, contract_module):
+        market_id = make_market(contract, as_user, clock, mode="EVIDENCE", source="")
+        total = contract_module.MAX_EVIDENCE_CONSIDERED + 3
+        for i in range(total):
+            self._submit(contract, as_user, gl, market_id, ALICE, f"https://item{i}.example", f"clue-{i}")
+        stake(contract, as_user, market_id, ALICE, "YES")
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        gl.nondet.web.calls.clear()  # only count fetches made during resolve(), not submission
+        as_user(CREATOR)
+        contract.resolve(market_id)
+        prompt = gl.nondet.prompts[0]
+        # Only the most recent MAX_EVIDENCE_CONSIDERED submissions were ever eligible.
+        for i in range(total - contract_module.MAX_EVIDENCE_CONSIDERED):
+            assert f"clue-{i}" not in prompt
+        for i in range(total - contract_module.MAX_EVIDENCE_CONSIDERED, total):
+            assert f"clue-{i}" in prompt
+        assert len(gl.nondet.web.calls) <= contract_module.MAX_EVIDENCE_CONSIDERED * contract_module.FETCH_ATTEMPTS
+
+
+class TestHybridRequiresBothSourceAndEvidence:
+    """HYBRID must never reach an LLM/validator verdict on the primary source
+    alone — it needs a primary source AND at least one still-valid verified
+    evidence record, or it settles VOID."""
+
+    def _submit(self, contract, as_user, gl, market_id, who, url, note, body=b"stable content", status=200):
+        gl.nondet.web.set_response(url, body, status)
+        as_user(who)
+        return json.loads(contract.submit_evidence(market_id, url, note))
+
+    def test_source_but_no_evidence_voids(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="HYBRID", source="https://source.example")
+        gl.nondet.web.set_response("https://source.example", b"content", 200)
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "VOID"
+        assert gl.nondet.prompts == []
+
+    def test_source_and_only_unverified_evidence_voids(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="HYBRID", source="https://source.example")
+        self._submit(contract, as_user, gl, market_id, ALICE, "http://insecure.example", "not https", b"x", 200)
+        gl.nondet.web.set_response("https://source.example", b"content", 200)
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "VOID"
+        assert gl.nondet.prompts == []
+
+    def test_source_and_drifted_evidence_with_no_other_valid_record_voids(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="HYBRID", source="https://source.example")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://drifting.example", "will drift", b"original")
+        gl.nondet.web.set_response("https://drifting.example", b"different now", 200)
+        gl.nondet.web.set_response("https://source.example", b"content", 200)
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        # The primary source alone must NOT be enough for HYBRID to proceed.
+        assert result["status"] == "VOID"
+        assert gl.nondet.prompts == []
+
+    def test_source_and_one_valid_evidence_record_resolves_normally(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="HYBRID", source="https://source.example")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://evidence.example", "solid clue")
+        stake(contract, as_user, market_id, ALICE, "YES")
+        gl.nondet.web.set_response("https://source.example", b"content", 200)
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "RESOLVED" and result["outcome"] == "YES"
+        assert "solid clue" in gl.nondet.prompts[0]
+
+    def test_resolves_using_only_the_still_valid_evidence_subset(self, contract, as_user, clock, gl):
+        market_id = make_market(contract, as_user, clock, mode="HYBRID", source="https://source.example")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://good.example", "good clue", b"good body")
+        self._submit(contract, as_user, gl, market_id, BOB, "http://insecure.example", "unverified clue", b"x")
+        self._submit(contract, as_user, gl, market_id, ALICE, "https://drifting.example", "stale clue", b"was this")
+        gl.nondet.web.set_response("https://drifting.example", b"now this", 200)  # drifts before resolve
+        stake(contract, as_user, market_id, ALICE, "YES")
+        gl.nondet.web.set_response("https://source.example", b"content", 200)
+        gl.nondet.set_prompt_response({"outcome": "YES"})
+        clock.advance(700)
+        as_user(CREATOR)
+        result = json.loads(contract.resolve(market_id))
+        assert result["status"] == "RESOLVED" and result["outcome"] == "YES"
+        prompt = gl.nondet.prompts[0]
+        assert "good clue" in prompt
+        assert "unverified clue" not in prompt
+        assert "stale clue" not in prompt
+
+
 class TestSettlementAccounting:
     def _resolve_yes(self, contract, as_user, clock, gl, market_id, source):
         clock.advance(700)
